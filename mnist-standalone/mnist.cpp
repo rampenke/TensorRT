@@ -8,6 +8,8 @@
 #include "buffers.h"
 #include <cmath>
 #include <iomanip>
+#include <string.h>
+#include "mnist.h"
 
 using namespace nvinfer1;
 using namespace nvonnxparser;
@@ -34,7 +36,7 @@ struct ModelParams {
 };
 
 
-ModelParams initializeModelParams(int argc, char *argv[]) {
+ModelParams initializeModelParams() {
     ModelParams params;
     params.dataDirs.push_back("data/mnist/");
     params.dataDirs.push_back("data/samples/mnist/");
@@ -115,19 +117,6 @@ struct InferDeleter {
     }
 };
 
-/// Tag type for binary construction.
-struct binary_t
-{
-};
-
-#define HALF_NOEXCEPT noexcept
-#define HALF_NOTHROW noexcept
-
-#define HALF_CONSTEXPR			constexpr
-#define HALF_CONSTEXPR_CONST	constexpr
-
-/// Tag for binary construction.
-HALF_CONSTEXPR_CONST binary_t binary = binary_t();
 
 /// Temporary half-precision expression.
 /// This class represents a half-precision expression which just stores a single-precision value internally.
@@ -135,11 +124,11 @@ struct expr
 {
     /// Conversion constructor.
     /// \param f single-precision value to convert
-    explicit HALF_CONSTEXPR expr(float f) HALF_NOEXCEPT : value_(f) {}
+    explicit constexpr expr(float f) noexcept : value_(f) {}
 
     /// Conversion to single-precision.
     /// \return single precision value representing expression value
-    HALF_CONSTEXPR operator float() const HALF_NOEXCEPT
+    constexpr operator float() const noexcept
     {
         return value_;
     }
@@ -228,7 +217,7 @@ public:
     }
 
 
-    bool Infer() {
+    int Infer(std::vector<uint8_t>& inputData) {
         // Create RAII buffer manager object
         BufferManager buffers(mEngine);
 
@@ -244,7 +233,7 @@ public:
 
         // Read the input data into the managed buffers
         ASSERT(mParams.inputTensorNames.size() == 1);
-        if (!processInput(buffers)) {
+        if (!processInput(buffers, inputData)) {
             return false;
         }
 
@@ -260,26 +249,26 @@ public:
         buffers.copyOutputToHost();
 
         // Verify results
-        if (!verifyOutput(buffers)){
-            return false;
-        }
+        auto result = verifyOutput(buffers);
 
-        return true;
+        return result;
     }
 
 
     //!
     //! \brief Reads the input and stores the result in a managed buffer
     //!
-    bool processInput(const BufferManager& buffers) {
+    bool processInput(const BufferManager& buffers, std::vector<uint8_t>& inputData) {
         const int inputH = mInputDims.d[2];
         const int inputW = mInputDims.d[3];
 
         // Read a random digit file
+        /*
         srand(unsigned(time(nullptr)));
         std::vector<uint8_t> fileData(inputH * inputW);
         mNumber = rand() % 10;
         readPGMFile(locateFile(std::to_string(mNumber) + ".pgm", mParams.dataDirs), fileData.data(), inputH, inputW);
+        */
 
         // Print an ascii representation
         /*
@@ -289,9 +278,16 @@ public:
         }
         sample::gLogInfo << std::endl;
         */
+
+        std::cout << "Input:" << std::endl;
+        for (int i = 0; i < inputH * inputW; i++) {
+            std::cout << (" .:-=+*#%@"[inputData[i] / 26]) << (((i + 1) % inputW) ? "" : "\n");
+        }
+        std::cout << std::endl;
+
         float* hostDataBuffer = static_cast<float*>(buffers.getHostBuffer(mParams.inputTensorNames[0]));
         for (int i = 0; i < inputH * inputW; i++) {
-            hostDataBuffer[i] = 1.0 - float(fileData[i] / 255.0);
+            hostDataBuffer[i] = 1.0 - float(inputData[i] / 255.0);
         }
 
         return true;
@@ -302,7 +298,7 @@ public:
     //!
     //! \return whether the classification output matches expectations
     //!
-    bool verifyOutput(const BufferManager& buffers)
+    int verifyOutput(const BufferManager& buffers)
     {
         const int outputSize = mOutputDims.d[1];
         float* output = static_cast<float*>(buffers.getHostBuffer(mParams.outputTensorNames[0]));
@@ -335,8 +331,17 @@ public:
                             << std::endl;
         }
         //sample::gLogInfo << std::endl;
+        std::cout << std::endl;
 
-        return idx == mNumber && val > 0.9F;
+        return idx;
+    }
+
+    Dims getInputDims() {
+        return mInputDims;
+    }
+    
+    Dims getoutputDims() {
+        return mOutputDims;
     }
 
 public:
@@ -345,17 +350,53 @@ public:
     std::shared_ptr<ICudaEngine> mEngine;
     Dims mInputDims;  //!< The dimensions of the input to the network.
     Dims mOutputDims; //!< The dimensions of the output to the network.
-    int mNumber{0};    
 
     ModelParams mParams;
 };
 
+std::unique_ptr<std::vector<uint8_t>> getTestData(ModelParams& params, int inputH, int inputW) {
+    auto fileData = std::make_unique<std::vector<uint8_t>>(inputH * inputW);
+    int number = rand() % 10;
+    readPGMFile(locateFile(std::to_string(number) + ".pgm", params.dataDirs), fileData->data(), inputH, inputW);
+    return fileData;
+}
+
+bool MnistApi::load() {
+    auto params = initializeModelParams();
+    Inference *inference = new Inference();
+    mModel = inference;
+    return inference->Build(params);
+}
+
+int MnistApi::infer(const char*data) {
+    auto inference = static_cast<Inference *>(this->mModel);
+    auto inputDims = inference->getInputDims();
+    const int inputH = inputDims.d[2];
+    const int inputW = inputDims.d[3];
+
+    auto input = std::make_unique<std::vector<uint8_t>>(inputH * inputW);
+    memcpy(input->data(), data, inputH * inputW);
+    return inference->Infer(*input);
+}
+
+
+#if 0
 int main(int argc, char *argv[]) {
 
-    std::string engine_file = "Example.engine";
     Inference inference;
     // Create a TensorRT runtime
-    auto params = initializeModelParams(argc, argv);
+    auto params = initializeModelParams();
     inference.Build(params);
-    auto res = inference.Infer();
+
+    srand(unsigned(time(nullptr)));
+
+    auto inputDims = inference.getInputDims();
+    const int inputH = inputDims.d[2];
+    const int inputW = inputDims.d[3];
+
+    for (int i = 0; i < 3; i++) {
+        auto testData = getTestData(params, inputH, inputW);
+        auto res = inference.Infer(*testData);
+    }
 }
+#endif
